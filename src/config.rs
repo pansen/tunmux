@@ -22,6 +22,30 @@ pub struct AppConfig {
     pub wgconf: WgconfConfig,
 }
 
+impl AppConfig {
+    /// Returns the hook config for a given provider.
+    pub fn hooks_for(&self, provider: Provider) -> &HookConfig {
+        match provider {
+            Provider::Proton => &self.proton.hooks,
+            Provider::AirVpn => &self.airvpn.hooks,
+            Provider::Mullvad => &self.mullvad.hooks,
+            Provider::Ivpn => &self.ivpn.hooks,
+            Provider::Wgconf => &self.wgconf.hooks,
+        }
+    }
+
+    /// Returns the default country for a provider, if configured.
+    pub fn default_country_for(&self, provider: Provider) -> Option<&str> {
+        match provider {
+            Provider::Proton => self.proton.default_country.as_deref(),
+            Provider::AirVpn => self.airvpn.default_country.as_deref(),
+            Provider::Mullvad => self.mullvad.default_country.as_deref(),
+            Provider::Ivpn => self.ivpn.default_country.as_deref(),
+            Provider::Wgconf => None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct GeneralConfig {
@@ -178,12 +202,17 @@ pub fn load_config() -> AppConfig {
 
 // ── Provider enum ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Provider {
+    #[value(name = "proton")]
     Proton,
+    #[value(name = "airvpn")]
     AirVpn,
+    #[value(name = "mullvad")]
     Mullvad,
+    #[value(name = "ivpn")]
     Ivpn,
+    #[value(name = "wgconf")]
     Wgconf,
 }
 
@@ -196,6 +225,25 @@ impl Provider {
             Provider::Mullvad => "mullvad",
             Provider::Ivpn => "ivpn",
             Provider::Wgconf => "wgconf",
+        }
+    }
+
+    /// Alias for `dir_name` – kept for call-site readability.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        self.dir_name()
+    }
+
+    /// Parse a provider directory name (e.g. `"proton"`) into its enum variant.
+    #[must_use]
+    pub fn from_dir_name(name: &str) -> Option<Self> {
+        match name {
+            "proton" => Some(Provider::Proton),
+            "airvpn" => Some(Provider::AirVpn),
+            "mullvad" => Some(Provider::Mullvad),
+            "ivpn" => Some(Provider::Ivpn),
+            "wgconf" => Some(Provider::Wgconf),
+            _ => None,
         }
     }
 }

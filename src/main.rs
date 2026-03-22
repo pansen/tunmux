@@ -210,7 +210,7 @@ fn cmd_hook_debug(
     event: HookEventArg,
 ) -> anyhow::Result<()> {
     let state = resolve_connection_for_hook_debug(instance, provider)?;
-    let provider_cfg = config_provider_from_dir_name(&state.provider).ok_or_else(|| {
+    let provider_cfg = config::Provider::from_dir_name(&state.provider).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported provider in connection state: {}",
             state.provider
@@ -244,12 +244,12 @@ fn resolve_connection_for_hook_debug(
             .ok_or_else(|| anyhow::anyhow!("no connection with instance {:?}", instance_name))?;
 
         if let Some(requested) = provider {
-            if conn.provider != provider_label(requested) {
+            if conn.provider != requested.label() {
                 anyhow::bail!(
                     "instance {:?} belongs to provider {:?}, not {:?}",
                     instance_name,
                     conn.provider,
-                    provider_label(requested)
+                    requested.label()
                 );
             }
         }
@@ -259,7 +259,7 @@ fn resolve_connection_for_hook_debug(
 
     let mut connections = ConnectionState::load_all()?;
     if let Some(requested) = provider {
-        let requested_label = provider_label(requested);
+        let requested_label = requested.label();
         connections.retain(|conn| conn.provider == requested_label);
     }
 
@@ -337,7 +337,7 @@ async fn run_disconnect(
         }
 
         for conn in connections {
-            let resolved = provider_from_dir_name(&conn.provider).ok_or_else(|| {
+            let resolved = config::Provider::from_dir_name(&conn.provider).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unsupported provider in connection state: {}",
                     conn.provider
@@ -352,7 +352,7 @@ async fn run_disconnect(
     if let Some(instance_name) = instance {
         let conn = ConnectionState::load(&instance_name)?
             .ok_or_else(|| anyhow::anyhow!("no connection with instance {:?}", instance_name))?;
-        let resolved = provider_from_dir_name(&conn.provider).ok_or_else(|| {
+        let resolved = config::Provider::from_dir_name(&conn.provider).ok_or_else(|| {
             anyhow::anyhow!(
                 "unsupported provider in connection state: {}",
                 conn.provider
@@ -364,8 +364,8 @@ async fn run_disconnect(
                 anyhow::bail!(
                     "instance {:?} belongs to provider {:?}, not {:?}",
                     instance_name,
-                    provider_label(resolved),
-                    provider_label(requested)
+                    resolved.label(),
+                    requested.label()
                 );
             }
         }
@@ -384,7 +384,7 @@ async fn run_disconnect(
         }
         1 => {
             let conn = &connections[0];
-            let resolved = provider_from_dir_name(&conn.provider).ok_or_else(|| {
+            let resolved = config::Provider::from_dir_name(&conn.provider).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unsupported provider in connection state: {}",
                     conn.provider
@@ -425,7 +425,7 @@ async fn dispatch_provider_disconnect(
             proton::handlers::dispatch(cli::ProtonCommand::Disconnect { instance, all }, config)
                 .await
         }
-        ProviderArg::Airvpn => {
+        ProviderArg::AirVpn => {
             airvpn::handlers::dispatch(cli::AirVpnCommand::Disconnect { instance, all }, config)
                 .await
         }
@@ -440,38 +440,6 @@ async fn dispatch_provider_disconnect(
             wgconf::handlers::dispatch(cli::WgconfCommand::Disconnect { instance, all }, config)
                 .await
         }
-    }
-}
-
-fn provider_from_dir_name(name: &str) -> Option<ProviderArg> {
-    match name {
-        "proton" => Some(ProviderArg::Proton),
-        "airvpn" => Some(ProviderArg::Airvpn),
-        "mullvad" => Some(ProviderArg::Mullvad),
-        "ivpn" => Some(ProviderArg::Ivpn),
-        "wgconf" => Some(ProviderArg::Wgconf),
-        _ => None,
-    }
-}
-
-fn provider_label(provider: ProviderArg) -> &'static str {
-    match provider {
-        ProviderArg::Proton => "proton",
-        ProviderArg::Airvpn => "airvpn",
-        ProviderArg::Mullvad => "mullvad",
-        ProviderArg::Ivpn => "ivpn",
-        ProviderArg::Wgconf => "wgconf",
-    }
-}
-
-fn config_provider_from_dir_name(name: &str) -> Option<config::Provider> {
-    match name {
-        "proton" => Some(config::Provider::Proton),
-        "airvpn" => Some(config::Provider::AirVpn),
-        "mullvad" => Some(config::Provider::Mullvad),
-        "ivpn" => Some(config::Provider::Ivpn),
-        "wgconf" => Some(config::Provider::Wgconf),
-        _ => None,
     }
 }
 
@@ -741,13 +709,16 @@ fn print_local_proxy_info(conn: &wireguard::connection::ConnectionState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_dns_servers_env_list, provider_from_dir_name, provider_label};
-    use crate::cli::ProviderArg;
+    use super::parse_dns_servers_env_list;
+    use crate::config;
 
     #[test]
     fn provider_mapping_includes_wgconf() {
-        assert_eq!(provider_from_dir_name("wgconf"), Some(ProviderArg::Wgconf));
-        assert_eq!(provider_label(ProviderArg::Wgconf), "wgconf");
+        assert_eq!(
+            config::Provider::from_dir_name("wgconf"),
+            Some(config::Provider::Wgconf)
+        );
+        assert_eq!(config::Provider::Wgconf.label(), "wgconf");
     }
 
     #[test]

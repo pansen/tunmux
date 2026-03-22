@@ -41,25 +41,7 @@ pub async fn dispatch(command: ProtonCommand, config: &AppConfig) -> anyhow::Res
             tag,
             sort,
         } => cmd_servers(country, free, tag, sort, config).await,
-        ProtonCommand::Connect(args) => {
-            cmd_connect(
-                args.server,
-                args.country,
-                args.p2p,
-                args.port_forwarding,
-                args.sort,
-                args.backend,
-                args.proxy,
-                args.local_proxy,
-                args.disable_ipv6,
-                args.mtu,
-                args.socks_port,
-                args.http_port,
-                args.proxy_access_log,
-                config,
-            )
-            .await
-        }
+        ProtonCommand::Connect(args) => cmd_connect(args, config).await,
         ProtonCommand::Ports { action } => cmd_ports(action, config).await,
         ProtonCommand::Disconnect { instance, all } => cmd_disconnect(instance, all, config),
     }
@@ -1028,42 +1010,17 @@ fn apply_proton_feature_filters(
 }
 
 
-#[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
-    server_name: Option<String>,
-    country: Option<String>,
-    p2p: bool,
-    port_forwarding: bool,
-    sort: String,
-    backend_arg: Option<String>,
-    use_proxy: bool,
-    use_local_proxy: bool,
-    disable_ipv6: bool,
-    mtu_arg: Option<u16>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log_arg: bool,
+    args: crate::cli::ProtonConnectArgs,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
-    let backend = connection_ops::resolve_connect_backend(
-        backend_arg.as_deref(),
-        &config.general.backend,
-        use_proxy,
-        use_local_proxy,
-    )?;
-    connection_ops::validate_disable_ipv6_direct_kernel(
-        disable_ipv6,
-        use_proxy,
-        use_local_proxy,
-        backend,
-    )?;
+    let backend = connection_ops::resolve_opts(&args.opts, &config.general.backend)?;
 
     // Apply config defaults -- CLI flags override config
-    let effective_country = country.or_else(|| config.proton.default_country.clone());
-    let proxy_access_log = proxy_access_log_arg || config.general.proxy_access_log;
+    let effective_country = args.country.or_else(|| config.default_country_for(PROVIDER).map(str::to_owned));
 
     let mut session: models::session::Session = config::load_session(PROVIDER, config)?;
-    if port_forwarding {
+    if args.port_forwarding {
         ensure_proton_port_forwarding_certificate_ready(&mut session, config).await?;
     } else {
         ensure_proton_certificate_ready(&mut session, config).await?;
@@ -1077,7 +1034,7 @@ async fn cmd_connect(
     servers.retain(|s| s.tier <= session.max_tier);
 
     // Select server
-    let server = if let Some(ref name) = server_name {
+    let server = if let Some(ref name) = args.server {
         servers
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(name))
@@ -1089,12 +1046,12 @@ async fn cmd_connect(
             servers.retain(|s| s.exit_country == cc_upper);
         }
         let mut requested_features = Vec::new();
-        if p2p || port_forwarding {
+        if args.p2p || args.port_forwarding {
             requested_features.push(models::server::ServerFeature::P2P);
         }
         apply_proton_feature_filters(&mut servers, &requested_features);
 
-        if sort == "latency" {
+        if args.sort == "latency" {
             let targets: Vec<(String, u16)> = servers
                 .iter()
                 .map(|server| {
@@ -1118,7 +1075,7 @@ async fn cmd_connect(
                 .map(|(server, _)| *server)
                 .ok_or(error::AppError::NoServerFound)?
         } else {
-            match sort.as_str() {
+            match args.sort.as_str() {
                 "score" => {
                     servers
                         .sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal));
@@ -1152,7 +1109,7 @@ async fn cmd_connect(
         private_key: &wg_private_key,
         addresses: &["10.2.0.2/32"],
         dns_servers: &["10.2.0.1"],
-        mtu: mtu_arg,
+        mtu: args.opts.mtu,
         server_public_key: server_pubkey,
         server_ip: &physical.entry_ip,
         server_port: 51820,
@@ -1160,29 +1117,19 @@ async fn cmd_connect(
         allowed_ips: "0.0.0.0/0, ::/0",
     };
 
-    if use_proxy {
-        connect_proxy(
-            server,
-            &params,
-            socks_port_arg,
-            http_port_arg,
-            proxy_access_log,
-            config,
-        )?;
-    } else if use_local_proxy {
-        connect_local_proxy(
-            &server.name,
-            &params,
-            socks_port_arg,
-            http_port_arg,
-            proxy_access_log,
-            config,
-        )?;
-    } else {
-        connect_direct(server, &params, backend, disable_ipv6, config)?;
-    }
-
-    Ok(())
+    let display_name = format!("{} ({})", server.name, server.exit_country);
+    connection_ops::connect_routed(
+        &connection_ops::ResolvedServer {
+            instance_seed: &server.name,
+            display_name: &display_name,
+        },
+        &params,
+        &args.opts,
+        backend,
+        PROVIDER,
+        INTERFACE_NAME,
+        config,
+    )
 }
 
 async fn ensure_proton_certificate_ready(
@@ -1312,104 +1259,28 @@ fn format_unix_utc(unix_time: i64) -> String {
         .unwrap_or_else(|_| unix_time.to_string())
 }
 
-fn connect_proxy(
-    server: &models::server::LogicalServer,
-    params: &wireguard::config::WgConfigParams<'_>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    let instance = connection_ops::derive_instance_name(&server.name, "server", &server.name)?;
-    connection_ops::ensure_instance_available(&instance, "server", &server.name)?;
-
-    let proxy_config =
-        connection_ops::resolve_proxy_config(socks_port_arg, http_port_arg, proxy_access_log)?;
-    connection_ops::connect_proxy_via_netns(&connection_ops::ConnectContext {
-        provider: PROVIDER,
-        instance: &instance,
-        display_name: &server.name,
-        connect_endpoint: params.server_ip,
-        state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
-        dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
-        params,
-        proxy_config: &proxy_config,
-        config,
-    })
-}
-
-fn connect_local_proxy(
-    server_name: &str,
-    params: &wireguard::config::WgConfigParams<'_>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    let instance = connection_ops::derive_instance_name(server_name, "server", server_name)?;
-    connection_ops::ensure_instance_available(&instance, "server", server_name)?;
-
-    let proxy_config =
-        connection_ops::resolve_proxy_config(socks_port_arg, http_port_arg, proxy_access_log)?;
-    connection_ops::connect_local_proxy_instance(&connection_ops::LocalProxyContext {
-        provider: PROVIDER,
-        instance: &instance,
-        display_name: server_name,
-        connect_endpoint: params.server_ip,
-        state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
-        dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
-        virtual_ips: params.addresses.iter().map(|s| s.to_string()).collect(),
-        peer_public_key: params.server_public_key,
-        params,
-        proxy_config: &proxy_config,
-        config,
-    })
-}
-
-fn connect_direct(
-    server: &models::server::LogicalServer,
-    params: &wireguard::config::WgConfigParams<'_>,
-    backend: wireguard::backend::WgBackend,
-    disable_ipv6: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::connect_direct_wg(
-        params,
-        backend,
-        INTERFACE_NAME,
-        PROVIDER,
-        &server.name,
-        disable_ipv6,
-        config,
-    )?;
-    println!(
-        "Connected to {} ({}) [backend: {}]",
-        server.name, server.exit_country, backend
-    );
-    Ok(())
-}
-
 fn cmd_disconnect(instance: Option<String>, all: bool, config: &AppConfig) -> anyhow::Result<()> {
     connection_ops::disconnect_provider_connections(PROVIDER.dir_name(), instance, all, |conn| {
-        disconnect_one(conn, config)
+        connection_ops::disconnect_one_provider_connection(conn, PROVIDER, config, false)?;
+        if conn.namespace_name.is_none()
+            && conn.instance_name == wireguard::connection::DIRECT_INSTANCE
+        {
+            clear_proton_port_forward_state_file()?;
+        }
+        Ok(())
     })
-}
-
-fn disconnect_one(
-    state: &wireguard::connection::ConnectionState,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::disconnect_one_provider_connection(state, PROVIDER, config, false)?;
-    if state.namespace_name.is_none()
-        && state.instance_name == wireguard::connection::DIRECT_INSTANCE
-    {
-        clear_proton_port_forward_state_file()?;
-    }
-    Ok(())
 }
 
 fn disconnect_instance_direct(config: &AppConfig) -> anyhow::Result<()> {
-    connection_ops::disconnect_instance_direct(|state| disconnect_one(state, config))
+    connection_ops::disconnect_instance_direct(|state| {
+        connection_ops::disconnect_one_provider_connection(state, PROVIDER, config, false)?;
+        if state.namespace_name.is_none()
+            && state.instance_name == wireguard::connection::DIRECT_INSTANCE
+        {
+            clear_proton_port_forward_state_file()?;
+        }
+        Ok(())
+    })
 }
 
 async fn load_servers_cached_or_fetch(

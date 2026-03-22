@@ -145,13 +145,7 @@ fn collect_hook_entries(config: &AppConfig, provider: Provider, event: HookEvent
 }
 
 fn provider_hooks(config: &AppConfig, provider: Provider) -> &HookConfig {
-    match provider {
-        Provider::Proton => &config.proton.hooks,
-        Provider::AirVpn => &config.airvpn.hooks,
-        Provider::Mullvad => &config.mullvad.hooks,
-        Provider::Ivpn => &config.ivpn.hooks,
-        Provider::Wgconf => &config.wgconf.hooks,
-    }
+    config.hooks_for(provider)
 }
 
 fn entries_for_event(hooks: &HookConfig, event: HookEvent) -> &[String] {

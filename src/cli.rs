@@ -1,5 +1,41 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+/// Common connect options shared across VPN providers.
+#[derive(Args, Clone, Debug)]
+pub struct ConnectOptions {
+    /// WireGuard backend: wg-quick, userspace, kernel
+    #[arg(short = 'b', long)]
+    pub backend: Option<String>,
+
+    /// Start a SOCKS5/HTTP proxy (Linux only; VPN traffic isolated in network namespace)
+    #[arg(long, conflicts_with = "local_proxy")]
+    pub proxy: bool,
+
+    /// Start a userspace SOCKS5/HTTP proxy without root or VpnService
+    #[arg(long, conflicts_with = "proxy")]
+    pub local_proxy: bool,
+
+    /// Disable host IPv6 egress while connected (direct kernel mode, IPv4-only profile)
+    #[arg(long)]
+    pub disable_ipv6: bool,
+
+    /// Set WireGuard interface MTU (direct mode)
+    #[arg(long)]
+    pub mtu: Option<u16>,
+
+    /// SOCKS5 proxy port (default: auto-assign from 1080)
+    #[arg(long)]
+    pub socks_port: Option<u16>,
+
+    /// HTTP proxy port (default: auto-assign from 8118)
+    #[arg(long)]
+    pub http_port: Option<u16>,
+
+    /// Enable proxy access logging to the instance log file
+    #[arg(long)]
+    pub proxy_access_log: bool,
+}
+
 #[derive(Parser)]
 #[command(
     name = "tunmux",
@@ -179,14 +215,7 @@ pub enum HookBuiltinArg {
     DnsDetection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ProviderArg {
-    Proton,
-    Airvpn,
-    Mullvad,
-    Ivpn,
-    Wgconf,
-}
+pub type ProviderArg = crate::config::Provider;
 
 #[derive(Subcommand)]
 pub enum ConnectProviderCommand {
@@ -227,37 +256,8 @@ pub struct ProtonConnectArgs {
     #[arg(short = 's', long, default_value = "score", value_parser = ["score", "load", "name", "latency"])]
     pub sort: String,
 
-    /// WireGuard backend: wg-quick, userspace, kernel
-    #[arg(short = 'b', long)]
-    pub backend: Option<String>,
-
-    /// Start a SOCKS5/HTTP proxy (Linux only; VPN traffic isolated in network namespace)
-    #[arg(long, conflicts_with = "local_proxy")]
-    pub proxy: bool,
-
-    /// Start a userspace SOCKS5/HTTP proxy without root or VpnService
-    #[arg(long, conflicts_with = "proxy")]
-    pub local_proxy: bool,
-
-    /// Disable host IPv6 egress while connected (direct kernel mode, IPv4-only profile)
-    #[arg(long)]
-    pub disable_ipv6: bool,
-
-    /// Set WireGuard interface MTU (direct mode)
-    #[arg(long)]
-    pub mtu: Option<u16>,
-
-    /// SOCKS5 proxy port (default: auto-assign from 1080)
-    #[arg(long)]
-    pub socks_port: Option<u16>,
-
-    /// HTTP proxy port (default: auto-assign from 8118)
-    #[arg(long)]
-    pub http_port: Option<u16>,
-
-    /// Enable proxy access logging to the instance log file
-    #[arg(long)]
-    pub proxy_access_log: bool,
+    #[command(flatten)]
+    pub opts: ConnectOptions,
 }
 
 #[derive(Args, Clone)]
@@ -277,37 +277,8 @@ pub struct AirVpnConnectArgs {
     #[arg(short = 's', long, default_value = "score", value_parser = ["score", "load", "name", "latency"])]
     pub sort: String,
 
-    /// WireGuard backend: wg-quick, userspace, kernel
-    #[arg(short = 'b', long)]
-    pub backend: Option<String>,
-
-    /// Start a SOCKS5/HTTP proxy (Linux only; VPN traffic isolated in network namespace)
-    #[arg(long, conflicts_with = "local_proxy")]
-    pub proxy: bool,
-
-    /// Start a userspace SOCKS5/HTTP proxy without root or VpnService
-    #[arg(long, conflicts_with = "proxy")]
-    pub local_proxy: bool,
-
-    /// Disable host IPv6 egress while connected (direct kernel mode, IPv4-only profile)
-    #[arg(long)]
-    pub disable_ipv6: bool,
-
-    /// Set WireGuard interface MTU (direct mode)
-    #[arg(long)]
-    pub mtu: Option<u16>,
-
-    /// SOCKS5 proxy port (default: auto-assign from 1080)
-    #[arg(long)]
-    pub socks_port: Option<u16>,
-
-    /// HTTP proxy port (default: auto-assign from 8118)
-    #[arg(long)]
-    pub http_port: Option<u16>,
-
-    /// Enable proxy access logging to the instance log file
-    #[arg(long)]
-    pub proxy_access_log: bool,
+    #[command(flatten)]
+    pub opts: ConnectOptions,
 }
 
 #[derive(Args, Clone)]
@@ -323,37 +294,8 @@ pub struct MullvadConnectArgs {
     #[arg(short = 's', long, default_value = "name", value_parser = ["name", "latency"])]
     pub sort: String,
 
-    /// WireGuard backend: wg-quick, userspace, kernel
-    #[arg(short = 'b', long)]
-    pub backend: Option<String>,
-
-    /// Start a SOCKS5/HTTP proxy (Linux only; VPN traffic isolated in network namespace)
-    #[arg(long, conflicts_with = "local_proxy")]
-    pub proxy: bool,
-
-    /// Start a userspace SOCKS5/HTTP proxy without root or VpnService
-    #[arg(long, conflicts_with = "proxy")]
-    pub local_proxy: bool,
-
-    /// Disable host IPv6 egress while connected (direct kernel mode, IPv4-only profile)
-    #[arg(long)]
-    pub disable_ipv6: bool,
-
-    /// Set WireGuard interface MTU (direct mode)
-    #[arg(long)]
-    pub mtu: Option<u16>,
-
-    /// SOCKS5 proxy port (default: auto-assign from 1080)
-    #[arg(long)]
-    pub socks_port: Option<u16>,
-
-    /// HTTP proxy port (default: auto-assign from 8118)
-    #[arg(long)]
-    pub http_port: Option<u16>,
-
-    /// Enable proxy access logging to the instance log file
-    #[arg(long)]
-    pub proxy_access_log: bool,
+    #[command(flatten)]
+    pub opts: ConnectOptions,
 }
 
 #[derive(Args, Clone)]
@@ -369,37 +311,8 @@ pub struct IvpnConnectArgs {
     #[arg(short = 's', long, default_value = "load", value_parser = ["load", "name", "latency"])]
     pub sort: String,
 
-    /// WireGuard backend: wg-quick, userspace, kernel
-    #[arg(short = 'b', long)]
-    pub backend: Option<String>,
-
-    /// Start a SOCKS5/HTTP proxy (Linux only; VPN traffic isolated in network namespace)
-    #[arg(long, conflicts_with = "local_proxy")]
-    pub proxy: bool,
-
-    /// Start a userspace SOCKS5/HTTP proxy without root or VpnService
-    #[arg(long, conflicts_with = "proxy")]
-    pub local_proxy: bool,
-
-    /// Disable host IPv6 egress while connected (direct kernel mode, IPv4-only profile)
-    #[arg(long)]
-    pub disable_ipv6: bool,
-
-    /// Set WireGuard interface MTU (direct mode)
-    #[arg(long)]
-    pub mtu: Option<u16>,
-
-    /// SOCKS5 proxy port (default: auto-assign from 1080)
-    #[arg(long)]
-    pub socks_port: Option<u16>,
-
-    /// HTTP proxy port (default: auto-assign from 8118)
-    #[arg(long)]
-    pub http_port: Option<u16>,
-
-    /// Enable proxy access logging to the instance log file
-    #[arg(long)]
-    pub proxy_access_log: bool,
+    #[command(flatten)]
+    pub opts: ConnectOptions,
 }
 
 #[derive(Args, Clone)]
@@ -1089,7 +1002,7 @@ mod tests {
         match proton.command {
             TopCommand::Connect {
                 provider: ConnectProviderCommand::Proton(args),
-            } => assert!(args.disable_ipv6),
+            } => assert!(args.opts.disable_ipv6),
             _ => panic!("expected proton connect provider"),
         }
 
@@ -1098,7 +1011,7 @@ mod tests {
         match airvpn.command {
             TopCommand::Connect {
                 provider: ConnectProviderCommand::Airvpn(args),
-            } => assert!(args.disable_ipv6),
+            } => assert!(args.opts.disable_ipv6),
             _ => panic!("expected airvpn connect provider"),
         }
 
@@ -1107,7 +1020,7 @@ mod tests {
         match mullvad.command {
             TopCommand::Connect {
                 provider: ConnectProviderCommand::Mullvad(args),
-            } => assert!(args.disable_ipv6),
+            } => assert!(args.opts.disable_ipv6),
             _ => panic!("expected mullvad connect provider"),
         }
 
@@ -1116,7 +1029,7 @@ mod tests {
         match ivpn.command {
             TopCommand::Connect {
                 provider: ConnectProviderCommand::Ivpn(args),
-            } => assert!(args.disable_ipv6),
+            } => assert!(args.opts.disable_ipv6),
             _ => panic!("expected ivpn connect provider"),
         }
     }
@@ -1128,7 +1041,7 @@ mod tests {
         match proton.command {
             TopCommand::Connect {
                 provider: ConnectProviderCommand::Proton(args),
-            } => assert_eq!(args.mtu, Some(1280)),
+            } => assert_eq!(args.opts.mtu, Some(1280)),
             _ => panic!("expected proton connect provider"),
         }
 

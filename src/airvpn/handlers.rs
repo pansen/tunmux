@@ -23,24 +23,7 @@ pub async fn dispatch(command: AirVpnCommand, config: &AppConfig) -> anyhow::Res
         AirVpnCommand::Logout => cmd_logout(config).await,
         AirVpnCommand::Info => cmd_info(config),
         AirVpnCommand::Servers { country, tag, sort } => cmd_servers(country, tag, sort).await,
-        AirVpnCommand::Connect(args) => {
-            cmd_connect(
-                args.server,
-                args.country,
-                args.key,
-                args.sort,
-                args.backend,
-                args.proxy,
-                args.local_proxy,
-                args.disable_ipv6,
-                args.mtu,
-                args.socks_port,
-                args.http_port,
-                args.proxy_access_log,
-                config,
-            )
-            .await
-        }
+        AirVpnCommand::Connect(args) => cmd_connect(args, config).await,
         AirVpnCommand::Disconnect { instance, all } => cmd_disconnect(instance, all, config),
         AirVpnCommand::Sessions => cmd_sessions(config).await,
         AirVpnCommand::Ports { action } => cmd_ports(action, config).await,
@@ -322,39 +305,15 @@ async fn probe_airvpn_latencies(
 }
 
 
-#[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
-    server_name: Option<String>,
-    country: Option<String>,
-    key_name: Option<String>,
-    sort: String,
-    backend_arg: Option<String>,
-    use_proxy: bool,
-    use_local_proxy: bool,
-    disable_ipv6: bool,
-    mtu_arg: Option<u16>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log_arg: bool,
+    args: crate::cli::AirVpnConnectArgs,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
-    let backend = connection_ops::resolve_connect_backend(
-        backend_arg.as_deref(),
-        &config.general.backend,
-        use_proxy,
-        use_local_proxy,
-    )?;
-    connection_ops::validate_disable_ipv6_direct_kernel(
-        disable_ipv6,
-        use_proxy,
-        use_local_proxy,
-        backend,
-    )?;
+    let backend = connection_ops::resolve_opts(&args.opts, &config.general.backend)?;
 
     // Apply config defaults -- CLI flags override config
-    let effective_country = country.or_else(|| config.airvpn.default_country.clone());
-    let effective_key = key_name.or_else(|| config.airvpn.default_device.clone());
-    let proxy_access_log = proxy_access_log_arg || config.general.proxy_access_log;
+    let effective_country = args.country.or_else(|| config.default_country_for(PROVIDER).map(str::to_owned));
+    let effective_key = args.key.or_else(|| config.airvpn.default_device.clone());
 
     let session: AirSession = config::load_session(PROVIDER, config)?;
     let manifest = load_manifest()?;
@@ -389,7 +348,7 @@ async fn cmd_connect(
     // Select server
     let mut candidates = manifest.servers;
 
-    let server = if let Some(ref name) = server_name {
+    let server = if let Some(ref name) = args.server {
         candidates
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(name))
@@ -402,7 +361,7 @@ async fn cmd_connect(
             candidates.retain(|s| s.country_code.eq_ignore_ascii_case(&cc_upper));
         }
 
-        if sort == "latency" || sort == "score" {
+        if args.sort == "latency" || args.sort == "score" {
             let latencies =
                 probe_airvpn_latencies(&candidates, wg_mode.entry_index as usize, wg_mode.port)
                     .await;
@@ -414,7 +373,7 @@ async fn cmd_connect(
                     (server, latency, score)
                 })
                 .collect();
-            match sort.as_str() {
+            match args.sort.as_str() {
                 "latency" => rows.sort_by(|a, b| {
                     latency_order(&a.1, &b.1)
                         .then_with(|| a.2.cmp(&b.2))
@@ -431,7 +390,7 @@ async fn cmd_connect(
                 .map(|(server, _, _)| server.clone())
                 .ok_or(error::AppError::NoServerFound)?
         } else {
-            match sort.as_str() {
+            match args.sort.as_str() {
                 "name" => {
                     candidates.sort_by(|a, b| a.name.cmp(&b.name));
                 }
@@ -492,7 +451,7 @@ async fn cmd_connect(
         private_key: &wg_key.wg_private_key,
         addresses: &addresses,
         dns_servers: &dns_servers,
-        mtu: mtu_arg,
+        mtu: args.opts.mtu,
         server_public_key: &session.wg_public_key,
         server_ip,
         server_port: wg_mode.port,
@@ -500,41 +459,19 @@ async fn cmd_connect(
         allowed_ips: "0.0.0.0/0, ::/0",
     };
 
-    if use_proxy {
-        connect_proxy(
-            &server.name,
-            &server.country_code,
-            server_ip,
-            wg_mode.port,
-            &params,
-            socks_port_arg,
-            http_port_arg,
-            proxy_access_log,
-            config,
-        )?;
-    } else if use_local_proxy {
-        connect_local_proxy(
-            &server.name,
-            &params,
-            socks_port_arg,
-            http_port_arg,
-            proxy_access_log,
-            config,
-        )?;
-    } else {
-        connect_direct(
-            &server.name,
-            &server.country_code,
-            server_ip,
-            wg_mode.port,
-            &params,
-            backend,
-            disable_ipv6,
-            config,
-        )?;
-    }
-
-    Ok(())
+    let server_name = &server.name;
+    connection_ops::connect_routed(
+        &connection_ops::ResolvedServer {
+            instance_seed: server_name,
+            display_name: server_name,
+        },
+        &params,
+        &args.opts,
+        backend,
+        PROVIDER,
+        INTERFACE_NAME,
+        config,
+    )
 }
 
 fn airvpn_server_matches_tags(server: &super::models::AirServer, tags: &[String]) -> bool {
@@ -550,106 +487,14 @@ fn airvpn_server_matches_tags(server: &super::models::AirServer, tags: &[String]
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn connect_proxy(
-    server_name: &str,
-    country_code: &str,
-    server_ip: &str,
-    _server_port: u16,
-    params: &wireguard::config::WgConfigParams<'_>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    let instance = connection_ops::derive_instance_name(server_name, "server", server_name)?;
-    connection_ops::ensure_instance_available(&instance, "server", server_name)?;
-
-    let proxy_config =
-        connection_ops::resolve_proxy_config(socks_port_arg, http_port_arg, proxy_access_log)?;
-    let display_name = format!("{} [{}]", server_name, country_code);
-    connection_ops::connect_proxy_via_netns(&connection_ops::ConnectContext {
-        provider: PROVIDER,
-        instance: &instance,
-        display_name: &display_name,
-        connect_endpoint: server_ip,
-        state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
-        dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
-        params,
-        proxy_config: &proxy_config,
-        config,
-    })
-}
-
-fn connect_local_proxy(
-    server_name: &str,
-    params: &wireguard::config::WgConfigParams<'_>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    let instance = connection_ops::derive_instance_name(server_name, "server", server_name)?;
-    connection_ops::ensure_instance_available(&instance, "server", server_name)?;
-
-    let proxy_config =
-        connection_ops::resolve_proxy_config(socks_port_arg, http_port_arg, proxy_access_log)?;
-    connection_ops::connect_local_proxy_instance(&connection_ops::LocalProxyContext {
-        provider: PROVIDER,
-        instance: &instance,
-        display_name: server_name,
-        connect_endpoint: params.server_ip,
-        state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
-        dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
-        virtual_ips: params.addresses.iter().map(|s| s.to_string()).collect(),
-        peer_public_key: params.server_public_key,
-        params,
-        proxy_config: &proxy_config,
-        config,
-    })
-}
-
-fn connect_direct(
-    server_name: &str,
-    country_code: &str,
-    _server_ip: &str,
-    _server_port: u16,
-    params: &wireguard::config::WgConfigParams<'_>,
-    backend: wireguard::backend::WgBackend,
-    disable_ipv6: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::connect_direct_wg(
-        params,
-        backend,
-        INTERFACE_NAME,
-        PROVIDER,
-        server_name,
-        disable_ipv6,
-        config,
-    )?;
-    println!(
-        "Connected to {} ({}) [backend: {}]",
-        server_name, country_code, backend
-    );
-    Ok(())
-}
-
 fn cmd_disconnect(instance: Option<String>, all: bool, config: &AppConfig) -> anyhow::Result<()> {
-    connection_ops::disconnect_provider_connections(PROVIDER.dir_name(), instance, all, |conn| {
-        disconnect_one(conn, config)
-    })
-}
-
-fn disconnect_one(
-    state: &wireguard::connection::ConnectionState,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::disconnect_one_provider_connection(state, PROVIDER, config, true)
+    connection_ops::cmd_disconnect_provider(PROVIDER, instance, all, config, true)
 }
 
 fn disconnect_instance_direct(config: &AppConfig) -> anyhow::Result<()> {
-    connection_ops::disconnect_instance_direct(|state| disconnect_one(state, config))
+    connection_ops::disconnect_instance_direct(|state| {
+        connection_ops::disconnect_one_provider_connection(state, PROVIDER, config, true)
+    })
 }
 
 async fn cmd_sessions(config: &AppConfig) -> anyhow::Result<()> {

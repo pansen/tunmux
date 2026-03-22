@@ -244,23 +244,7 @@ pub async fn dispatch(command: IvpnCommand, config: &AppConfig) -> anyhow::Resul
         IvpnCommand::Logout => cmd_logout(config).await,
         IvpnCommand::Info => cmd_info(config).await,
         IvpnCommand::Servers { country, tag, sort } => cmd_servers(country, tag, sort).await,
-        IvpnCommand::Connect(args) => {
-            cmd_connect(
-                args.server,
-                args.country,
-                args.sort,
-                args.backend,
-                args.proxy,
-                args.local_proxy,
-                args.disable_ipv6,
-                args.mtu,
-                args.socks_port,
-                args.http_port,
-                args.proxy_access_log,
-                config,
-            )
-            .await
-        }
+        IvpnCommand::Connect(args) => cmd_connect(args, config).await,
         IvpnCommand::Disconnect { instance, all } => cmd_disconnect(instance, all, config),
     }
 }
@@ -563,46 +547,23 @@ fn ivpn_matches_tags(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
-    server_name: Option<String>,
-    country: Option<String>,
-    sort: String,
-    backend_arg: Option<String>,
-    use_proxy: bool,
-    use_local_proxy: bool,
-    disable_ipv6: bool,
-    mtu_arg: Option<u16>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log_arg: bool,
+    args: crate::cli::IvpnConnectArgs,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
-    let backend = connection_ops::resolve_connect_backend(
-        backend_arg.as_deref(),
-        &config.general.backend,
-        use_proxy,
-        use_local_proxy,
-    )?;
-    connection_ops::validate_disable_ipv6_direct_kernel(
-        disable_ipv6,
-        use_proxy,
-        use_local_proxy,
-        backend,
-    )?;
+    let backend = connection_ops::resolve_opts(&args.opts, &config.general.backend)?;
 
-    let effective_country = country.or_else(|| config.ivpn.default_country.clone());
-    let proxy_access_log = proxy_access_log_arg || config.general.proxy_access_log;
+    let effective_country = args.country.or_else(|| config.default_country_for(PROVIDER).map(str::to_owned));
 
     let session: IvpnSession = config::load_session(PROVIDER, config)?;
     let client = api_client()?;
     let manifest = load_manifest_cached_or_fetch(&client).await?;
-    let (server, host) = if server_name.is_some() || sort != "latency" {
+    let (_server, host) = if args.server.is_some() || args.sort != "latency" {
         select_host(
             &manifest,
-            server_name.as_deref(),
+            args.server.as_deref(),
             effective_country.as_deref(),
-            &sort,
+            &args.sort,
         )?
     } else {
         let mut rows: Vec<(&IvpnWireGuardServer, &IvpnWireGuardHost)> = Vec::new();
@@ -666,7 +627,7 @@ async fn cmd_connect(
         private_key: &session.wg_private_key,
         addresses: &address_refs,
         dns_servers: &dns_refs,
-        mtu: mtu_arg,
+        mtu: args.opts.mtu,
         server_public_key: &host.public_key,
         server_ip: &host.host,
         server_port,
@@ -674,123 +635,22 @@ async fn cmd_connect(
         allowed_ips: "0.0.0.0/0, ::/0",
     };
 
-    if use_proxy {
-        connect_proxy(
-            server,
-            host,
-            &params,
-            socks_port_arg,
-            http_port_arg,
-            proxy_access_log,
-            config,
-        )?;
-    } else if use_local_proxy {
-        connect_local_proxy(
-            host,
-            &params,
-            socks_port_arg,
-            http_port_arg,
-            proxy_access_log,
-            config,
-        )?;
-    } else {
-        connect_direct(server, host, &params, backend, disable_ipv6, config)?;
-    }
-
-    Ok(())
-}
-
-fn connect_proxy(
-    server: &IvpnWireGuardServer,
-    host: &IvpnWireGuardHost,
-    params: &wireguard::config::WgConfigParams<'_>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    let instance = connection_ops::derive_instance_name(&host.hostname, "server", &host.hostname)?;
-    connection_ops::ensure_instance_available(&instance, "server", &host.hostname)?;
-
-    let proxy_config =
-        connection_ops::resolve_proxy_config(socks_port_arg, http_port_arg, proxy_access_log)?;
-    let display_name = format!("{} / {}", server.country_code, host.hostname);
-    connection_ops::connect_proxy_via_netns(&connection_ops::ConnectContext {
-        provider: PROVIDER,
-        instance: &instance,
-        display_name: &display_name,
-        connect_endpoint: params.server_ip,
-        state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
-        dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
-        params,
-        proxy_config: &proxy_config,
-        config,
-    })
-}
-
-fn connect_local_proxy(
-    host: &IvpnWireGuardHost,
-    params: &wireguard::config::WgConfigParams<'_>,
-    socks_port_arg: Option<u16>,
-    http_port_arg: Option<u16>,
-    proxy_access_log: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    let instance = connection_ops::derive_instance_name(&host.hostname, "server", &host.hostname)?;
-    connection_ops::ensure_instance_available(&instance, "server", &host.hostname)?;
-
-    let proxy_config =
-        connection_ops::resolve_proxy_config(socks_port_arg, http_port_arg, proxy_access_log)?;
-    connection_ops::connect_local_proxy_instance(&connection_ops::LocalProxyContext {
-        provider: PROVIDER,
-        instance: &instance,
-        display_name: &host.hostname,
-        connect_endpoint: params.server_ip,
-        state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
-        dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
-        virtual_ips: params.addresses.iter().map(|s| s.to_string()).collect(),
-        peer_public_key: params.server_public_key,
-        params,
-        proxy_config: &proxy_config,
-        config,
-    })
-}
-
-fn connect_direct(
-    server: &IvpnWireGuardServer,
-    host: &IvpnWireGuardHost,
-    params: &wireguard::config::WgConfigParams<'_>,
-    backend: wireguard::backend::WgBackend,
-    disable_ipv6: bool,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::connect_direct_wg(
-        params,
+    connection_ops::connect_routed(
+        &connection_ops::ResolvedServer {
+            instance_seed: &host.hostname,
+            display_name: &host.hostname,
+        },
+        &params,
+        &args.opts,
         backend,
-        INTERFACE_NAME,
         PROVIDER,
-        &host.hostname,
-        disable_ipv6,
+        INTERFACE_NAME,
         config,
-    )?;
-    println!(
-        "Connected to {} ({}, {}) [backend: {}]",
-        host.hostname, server.country_code, server.city, backend
-    );
-    Ok(())
+    )
 }
 
 fn cmd_disconnect(instance: Option<String>, all: bool, config: &AppConfig) -> anyhow::Result<()> {
-    connection_ops::disconnect_provider_connections(PROVIDER.dir_name(), instance, all, |conn| {
-        disconnect_one(conn, config)
-    })
-}
-
-fn disconnect_one(
-    state: &wireguard::connection::ConnectionState,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::disconnect_one_provider_connection(state, PROVIDER, config, false)
+    connection_ops::cmd_disconnect_provider(PROVIDER, instance, all, config, false)
 }
 
 async fn load_manifest_cached_or_fetch(client: &Client) -> anyhow::Result<IvpnManifest> {

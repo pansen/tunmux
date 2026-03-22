@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::cli::ConnectOptions;
 use crate::config::{AppConfig, Provider};
 use crate::local_proxy;
 use crate::netns;
@@ -8,6 +9,120 @@ use crate::shared::hooks;
 use crate::wireguard;
 use crate::wireguard::backend::WgBackend;
 use crate::wireguard::connection::ConnectionState;
+
+/// Describes a selected server for connection routing.
+pub struct ResolvedServer<'a> {
+    pub instance_seed: &'a str,
+    pub display_name: &'a str,
+}
+
+/// Resolve the WireGuard backend and validate options from ConnectOptions.
+pub fn resolve_opts(
+    opts: &ConnectOptions,
+    default_backend: &str,
+) -> anyhow::Result<WgBackend> {
+    let backend = resolve_connect_backend(
+        opts.backend.as_deref(),
+        default_backend,
+        opts.proxy,
+        opts.local_proxy,
+    )?;
+    validate_disable_ipv6_direct_kernel(
+        opts.disable_ipv6,
+        opts.proxy,
+        opts.local_proxy,
+        backend,
+    )?;
+    Ok(backend)
+}
+
+/// Resolve the effective proxy_access_log value.
+pub fn effective_proxy_access_log(opts: &ConnectOptions, config: &AppConfig) -> bool {
+    opts.proxy_access_log || config.general.proxy_access_log
+}
+
+/// Route a connection through proxy, local-proxy, or direct mode.
+///
+/// This consolidates the identical 3-way dispatch (connect_proxy / connect_local_proxy /
+/// connect_direct) that was previously duplicated in every provider handler.
+pub fn connect_routed(
+    server: &ResolvedServer<'_>,
+    params: &wireguard::config::WgConfigParams<'_>,
+    opts: &ConnectOptions,
+    backend: WgBackend,
+    provider: Provider,
+    interface_name: &str,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    let proxy_access_log = effective_proxy_access_log(opts, config);
+
+    if opts.proxy {
+        let instance = derive_instance_name(server.instance_seed, "server", server.display_name)?;
+        ensure_instance_available(&instance, "server", server.display_name)?;
+
+        let proxy_config =
+            resolve_proxy_config(opts.socks_port, opts.http_port, proxy_access_log)?;
+        connect_proxy_via_netns(&ConnectContext {
+            provider,
+            instance: &instance,
+            display_name: server.display_name,
+            connect_endpoint: params.server_ip,
+            state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
+            dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
+            params,
+            proxy_config: &proxy_config,
+            config,
+        })
+    } else if opts.local_proxy {
+        let instance = derive_instance_name(server.instance_seed, "server", server.display_name)?;
+        ensure_instance_available(&instance, "server", server.display_name)?;
+
+        let proxy_config =
+            resolve_proxy_config(opts.socks_port, opts.http_port, proxy_access_log)?;
+        connect_local_proxy_instance(&LocalProxyContext {
+            provider,
+            instance: &instance,
+            display_name: server.display_name,
+            connect_endpoint: params.server_ip,
+            state_endpoint: &format!("{}:{}", params.server_ip, params.server_port),
+            dns_servers: params.dns_servers.iter().map(|s| s.to_string()).collect(),
+            virtual_ips: params.addresses.iter().map(|s| s.to_string()).collect(),
+            peer_public_key: params.server_public_key,
+            params,
+            proxy_config: &proxy_config,
+            config,
+        })
+    } else {
+        connect_direct_wg(
+            params,
+            backend,
+            interface_name,
+            provider,
+            server.display_name,
+            opts.disable_ipv6,
+            config,
+        )?;
+        println!(
+            "Connected to {} [backend: {}]",
+            server.display_name, backend
+        );
+        Ok(())
+    }
+}
+
+/// Standard provider disconnect: delegates to `disconnect_provider_connections`
+/// with `disconnect_one_provider_connection`.
+pub fn cmd_disconnect_provider(
+    provider: Provider,
+    instance: Option<String>,
+    all: bool,
+    config: &AppConfig,
+    remove_namespace_dir: bool,
+) -> anyhow::Result<()> {
+    disconnect_provider_connections(provider.dir_name(), instance, all, |conn| {
+        disconnect_one_provider_connection(conn, provider, config, remove_namespace_dir)
+    })
+}
 
 pub fn resolve_connect_backend(
     backend_arg: Option<&str>,

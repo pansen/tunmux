@@ -362,16 +362,7 @@ fn connect_local_proxy(
 }
 
 fn cmd_disconnect(instance: Option<String>, all: bool, config: &AppConfig) -> anyhow::Result<()> {
-    connection_ops::disconnect_provider_connections(PROVIDER.dir_name(), instance, all, |conn| {
-        disconnect_one(conn, config)
-    })
-}
-
-fn disconnect_one(
-    state: &wireguard::connection::ConnectionState,
-    config: &AppConfig,
-) -> anyhow::Result<()> {
-    connection_ops::disconnect_one_provider_connection(state, PROVIDER, config, false)
+    connection_ops::cmd_disconnect_provider(PROVIDER, instance, all, config, false)
 }
 
 fn resolve_source(file: Option<&str>, profile: Option<&str>) -> anyhow::Result<ConfigSource> {
